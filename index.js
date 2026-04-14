@@ -1,7 +1,7 @@
 const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -33,12 +33,12 @@ FLUJO (UNA pregunta a la vez):
 3. Si ayer hubiese habido un fallecimiento, estaría preparado financieramente?
 4. Fecha de nacimiento, género, ciudad, estado
 5. Toma sus propias decisiones económicas?
-6. SALUD una por una: hospitalizado, cancer/derrame, tabaco actual, tabaco 10 años o presión mayor a 135/85, altura en pies y pulgadas, peso en libras, medicamentos
+6. SALUD una por una: hospitalizado, cáncer/derrame, tabaco actual, tabaco 10 años o presión >135/85, altura en pies y pulgadas, peso en libras, medicamentos
 7. Cremación, entierro o repatriación?
 8. Beneficios del programa
-9. Tres planes: Bueno 68.41 al mes, Mejor 78.95 al mes, Óptimo 89.49 al mes
-10. Cuando elija el plan, confirma y termina con:
-##LEAD## nombre|apellido|fechaNacimiento|genero|ciudad|estado|hospitalizado|cancer|tabaco|tabaco10|pies|pulgadas|peso|medicamentos|plan
+9. Tres planes: Bueno $68.41/mes, Mejor $78.95/mes, Óptimo $89.49/mes
+10. Cuando elija el plan, responde confirmando y termina tu mensaje con esta línea exacta:
+##LEAD## nombre|apellido|MM/DD/AAAA|MASCULINO o FEMENINO|ciudad|estado|SI o NO|SI o NO|SI o NO|SI o NO|pies|pulgadas|peso|SI o NO|Bueno o Mejor o Óptimo
 
 REGLAS:
 - Máximo 2 oraciones por parte
@@ -52,16 +52,16 @@ function sleep(ms) {
 }
 
 async function llenarPortal(datos) {
-  const token = process.env.BROWSERLESS_TOKEN;
   const agentId = process.env.SRLIFE_AGENT_ID;
   const password = process.env.SRLIFE_PASSWORD;
-  const luisNumber = process.env.LUIS_WHATSAPP;
   const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
+  const luisNumber = process.env.LUIS_WHATSAPP;
 
   let browser;
   try {
-    browser = await puppeteer.connect({
-      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}`,
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
 
     const page = await browser.newPage();
@@ -69,145 +69,173 @@ async function llenarPortal(datos) {
 
     // LOGIN
     console.log('Entrando al portal...');
-    await page.goto('https://telesales.srlife.net/login', { waitUntil: 'networkidle2', timeout: 30000 });
-    await page.waitForSelector('input', { timeout: 10000 });
-    const inputs = await page.$$('input');
-    if (inputs[0]) { await inputs[0].click(); await inputs[0].type(agentId); }
-    if (inputs[1]) { await inputs[1].click(); await inputs[1].type(password); }
-    await page.click('button[type="submit"], input[type="submit"]');
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+    await page.goto('https://telesales.srlife.net/login', { waitUntil: 'networkidle2' });
+    await page.type('input[name="agent_id"], input[placeholder*="Agent"], input[type="text"]', agentId);
+    await page.type('input[name="password"], input[type="password"]', password);
+    await page.click('button[type="submit"], input[type="submit"], .login-btn');
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
     console.log('Login exitoso');
 
+    // IR A APLICACIÓN
+    await page.goto('https://telesales.srlife.net/prequalifying/app_start_page', { waitUntil: 'networkidle2' });
+
     // PÁGINA 1 — Asegurado Propuesto
-    await page.goto('https://telesales.srlife.net/prequalifying/app_start_page', { waitUntil: 'networkidle2', timeout: 15000 });
+    console.log('Llenando página 1...');
     await page.waitForSelector('input', { timeout: 10000 });
-    await sleep(1000);
+    
+    const inputs = await page.$$('input[type="text"], input:not([type])');
+    if (inputs[0]) await inputs[0].type(datos.nombre);
+    if (inputs[1]) await inputs[1].type(datos.apellido);
 
-    const allInputs = await page.$$('input[type="text"], input:not([type="radio"]):not([type="checkbox"]):not([type="submit"]):not([type="button"])');
-    if (allInputs[0]) { await allInputs[0].triple_click(); await allInputs[0].type(datos.nombre); }
-    if (allInputs[1]) { await allInputs[1].triple_click(); await allInputs[1].type(datos.apellido); }
+    // Fecha de nacimiento
+    await page.$eval('input[type="date"]', (el, val) => { el.value = val; }, datos.fechaNacimiento);
 
-    await page.$eval('input[type="date"]', (el, val) => { el.value = val; el.dispatchEvent(new Event('change', { bubbles: true })); }, datos.fechaNacimiento);
+    // Género
+    await page.select('select', datos.genero === 'MASCULINO' ? 'MASCULINO/HOMBRE' : 'FEMENINO/MUJER');
 
-    const generoValue = datos.genero === 'MASCULINO' ? 'MASCULINO/HOMBRE' : 'FEMENINO/MUJER';
-    const selects = await page.$$('select');
-    for (const sel of selects) {
-      const opts = await sel.evaluate(el => Array.from(el.options).map(o => o.value));
-      if (opts.some(o => o.includes('MASCULINO') || o.includes('FEMENINO'))) {
-        await sel.select(generoValue).catch(() => sel.select(opts.find(o => o.includes(datos.genero === 'MASCULINO' ? 'MASC' : 'FEM')) || opts[1]));
-        break;
-      }
-    }
-
+    // Ciudad
     const cityInputs = await page.$$('input[type="text"]');
-    for (const inp of cityInputs) {
-      const ph = await inp.evaluate(el => (el.placeholder || '').toLowerCase());
-      if (ph.includes('ciudad') || ph.includes('city')) { await inp.type(datos.ciudad); break; }
-    }
-
-    const stateSelects = await page.$$('select');
-    for (const sel of stateSelects) {
-      const opts = await sel.evaluate(el => Array.from(el.options).map(o => ({ val: o.value, txt: o.text })));
-      if (opts.some(o => o.txt.includes('FLORIDA') || o.txt.includes('CALIFORNIA') || o.txt.includes('TEXAS'))) {
-        const match = opts.find(o => o.txt.toUpperCase().includes(datos.estado.toUpperCase()));
-        if (match) await sel.select(match.val);
+    for (const input of cityInputs) {
+      const placeholder = await input.evaluate(el => el.placeholder || '');
+      if (placeholder.toLowerCase().includes('ciudad')) {
+        await input.type(datos.ciudad);
         break;
       }
     }
 
-    await page.click('button:not([type="button"]), input[value*="SIGUIENTE"]').catch(() => {});
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    // Estado
+    const selects = await page.$$('select');
+    for (const select of selects) {
+      const options = await select.evaluate(el => Array.from(el.options).map(o => o.text));
+      if (options.some(o => o.includes('FLORIDA') || o.includes('CALIFORNIA'))) {
+        await select.select(datos.estado.toUpperCase());
+        break;
+      }
+    }
+
+    await page.click('button:has-text("SIGUIENTE"), .siguiente, [value="SIGUIENTE"]');
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
 
     // PÁGINA 2 — Hospitalizaciones y Salud
+    console.log('Llenando página 2...');
     await page.waitForSelector('input[type="radio"]', { timeout: 10000 });
-    await sleep(500);
-    const radios1 = await page.$$('input[type="radio"]');
-    // Hospitalizado NO=índice 1, SI=índice 0
-    const hospIdx = datos.hospitalizado === 'NO' ? 1 : 0;
-    if (radios1[hospIdx]) await radios1[hospIdx].click();
-    const cancerIdx = datos.cancer === 'NO' ? 3 : 2;
-    if (radios1[cancerIdx]) await radios1[cancerIdx].click();
-    await page.click('button, input[value*="SIGUIENTE"]').catch(() => {});
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    
+    const radios = await page.$$('input[type="radio"]');
+    // Hospitalizado: SI=0, NO=1
+    if (datos.hospitalizado === 'NO' && radios[1]) await radios[1].click();
+    else if (radios[0]) await radios[0].click();
+    // Cancer: SI=2, NO=3
+    if (datos.cancer === 'NO' && radios[3]) await radios[3].click();
+    else if (radios[2]) await radios[2].click();
 
-    // PÁGINA 3 — Tabaco
+    await page.click('button, .siguiente');
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
+
+    // PÁGINA 3 — Tabaco y Nicotina
+    console.log('Llenando página 3...');
     await page.waitForSelector('input[type="radio"]', { timeout: 10000 });
-    await sleep(500);
+    
     const radios2 = await page.$$('input[type="radio"]');
-    const tabacoIdx = datos.tabaco === 'NO' ? 1 : 0;
-    if (radios2[tabacoIdx]) await radios2[tabacoIdx].click();
-    const tabaco10Idx = datos.tabaco10 === 'NO' ? 3 : 2;
-    if (radios2[tabaco10Idx]) await radios2[tabaco10Idx].click();
-    await page.click('button, input[value*="SIGUIENTE"]').catch(() => {});
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    if (datos.tabaco === 'NO' && radios2[1]) await radios2[1].click();
+    else if (radios2[0]) await radios2[0].click();
+    if (datos.tabaco10 === 'NO' && radios2[3]) await radios2[3].click();
+    else if (radios2[2]) await radios2[2].click();
+
+    await page.click('button, .siguiente');
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
 
     // PÁGINA 4 — Altura, Peso y Medicamentos
+    console.log('Llenando página 4...');
     await page.waitForSelector('select', { timeout: 10000 });
-    await sleep(500);
-    const selects4 = await page.$$('select');
-    if (selects4[0]) await selects4[0].select(datos.pies).catch(() => {});
-    if (selects4[1]) await selects4[1].select(datos.pulgadas).catch(() => {});
-    const pesoInput = await page.$('input[type="number"], input[type="text"]');
-    if (pesoInput) { await pesoInput.click(); await pesoInput.type(datos.peso); }
+    
+    const selectsP4 = await page.$$('select');
+    if (selectsP4[0]) await selectsP4[0].select(datos.alturaPies);
+    if (selectsP4[1]) await selectsP4[1].select(datos.alturaPulgadas);
+
+    const pesoInput = await page.$('input[type="number"], input[placeholder*="peso"], input[placeholder*="Peso"]');
+    if (pesoInput) await pesoInput.type(datos.peso);
+
     const radios3 = await page.$$('input[type="radio"]');
-    const medsIdx = datos.medicamentos === 'NO' ? 1 : 0;
-    if (radios3[medsIdx]) await radios3[medsIdx].click();
-    await page.click('button, input[value*="SIGUIENTE"]').catch(() => {});
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+    if (datos.medicamentos === 'NO' && radios3[1]) await radios3[1].click();
+    else if (radios3[0]) await radios3[0].click();
+
+    await page.click('button, .siguiente');
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
 
     // PÁGINA 5 — Seleccionar Producto
-    await sleep(2000);
-    const productoTexto = (datos.hospitalizado === 'NO' && datos.cancer === 'NO' && datos.tabaco === 'NO' && datos.tabaco10 === 'NO')
-      ? 'MÁXIMO PREFERIDO' : (datos.tabaco === 'SI' || datos.tabaco10 === 'SI') ? 'SUPER PREFERIDO' : 'PREFERIDO';
+    console.log('Seleccionando producto...');
+    await page.waitForSelector('li, .product-item, table tr', { timeout: 10000 });
+    
+    // Seleccionar Máximo Preferido basado en el perfil de salud
+    const productoTexto = datos.hospitalizado === 'NO' && datos.cancer === 'NO' && datos.tabaco === 'NO' && datos.tabaco10 === 'NO'
+      ? 'MÁXIMO PREFERIDO'
+      : datos.tabaco === 'SI' || datos.tabaco10 === 'SI'
+        ? 'SUPER PREFERIDO'
+        : 'PREFERIDO';
 
-    const items = await page.$$('li, tr, div[role="button"], .product-item');
+    const items = await page.$$('li, tr, .product-item');
     for (const item of items) {
       const text = await item.evaluate(el => el.textContent.toUpperCase());
-      if (text.includes(productoTexto.replace('Á', 'A').replace('É', 'E'))) {
+      if (text.includes(productoTexto)) {
         await item.click();
         break;
       }
     }
-    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
 
-    // PÁGINA 6 — Capturar planes reales
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
+
+    // PÁGINA 6 — Capturar planes y precios
+    console.log('Capturando planes...');
     await sleep(2000);
-    const pageText = await page.evaluate(() => document.body.innerText);
-    console.log('Planes capturados:', pageText.substring(0, 500));
+    
+    const screenshot = await page.screenshot({ encoding: 'base64' });
+    const pageContent = await page.evaluate(() => document.body.innerText);
+
+    // Extraer precios de los planes
+    let planesTexto = 'Planes disponibles:\n';
+    const precios = pageContent.match(/\$[\d,]+\.?\d*/g) || [];
+    const planNames = ['Bueno', 'Mejor', 'Óptimo'];
+    precios.slice(0, 6).forEach((precio, i) => {
+      if (i < 3) planesTexto += `${planNames[i]}: ${precio}/mes\n`;
+    });
 
     await browser.close();
 
-    // Notificar a Luis con planes reales
-    const mensaje = `✅ LEAD CALIFICADO - Portal llenado automaticamente!
+    // Notificar a Luis con los planes reales
+    const mensaje = `NUEVO LEAD CALIFICADO
 
-👤 ${datos.nombre} ${datos.apellido}
-📍 ${datos.ciudad}, ${datos.estado}
-📅 ${datos.fechaNacimiento} | ${datos.genero}
+Cliente: ${datos.nombre} ${datos.apellido}
+Fecha nac: ${datos.fechaNacimiento}
+${datos.ciudad}, ${datos.estado}
 
-🏥 SALUD:
-• Hospitalizado: ${datos.hospitalizado}
-• Cancer/derrame: ${datos.cancer}
-• Tabaco: ${datos.tabaco}
-• Medicamentos: ${datos.medicamentos}
+SALUD:
+Hospitalizado: ${datos.hospitalizado}
+Cancer/derrame: ${datos.cancer}
+Tabaco: ${datos.tabaco}
+Medicamentos: ${datos.medicamentos}
 
-💰 PLAN ELEGIDO: ${datos.plan}
-📋 Producto: ${productoTexto}
+PLAN ELEGIDO: ${datos.plan}
 
-El portal ya fue llenado. Entre a revisar los planes exactos y llame para cerrar!
-telesales.srlife.net`;
+${planesTexto}
+Producto: ${productoTexto}
+
+Portal ya llenado automaticamente!
+Llame para cerrar la venta.`;
 
     if (luisNumber) {
       await twilioClient.messages.create({
         from: twilioNumber,
-        to: `whatsapp:+${luisNumber}`,
+        to: `whatsapp:${luisNumber}`,
         body: mensaje
       });
+      console.log('Notificacion enviada a Luis con planes reales');
     }
 
   } catch (error) {
     console.error('Error llenando portal:', error.message);
-    if (browser) await browser.close().catch(() => {});
-
+    if (browser) await browser.close();
+    
+    // Notificar a Luis igualmente con los datos aunque falle el portal
     if (luisNumber) {
       const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
       await twilioClient.messages.create({
@@ -216,9 +244,9 @@ telesales.srlife.net`;
         body: `LEAD CALIFICADO (llenar portal manualmente):
 Cliente: ${datos.nombre} ${datos.apellido}
 ${datos.ciudad}, ${datos.estado}
-Plan: ${datos.plan}
-telesales.srlife.net`
-      }).catch(e => console.error('Error notif:', e));
+Plan elegido: ${datos.plan}
+Portal: telesales.srlife.net`
+      }).catch(e => console.error('Error notificando:', e));
     }
   }
 }
@@ -232,12 +260,12 @@ function parsearLead(texto) {
     nombre: campos[0], apellido: campos[1], fechaNacimiento: campos[2],
     genero: campos[3], ciudad: campos[4], estado: campos[5],
     hospitalizado: campos[6], cancer: campos[7], tabaco: campos[8],
-    tabaco10: campos[9], pies: campos[10], pulgadas: campos[11],
+    tabaco10: campos[9], alturaPies: campos[10], alturaPulgadas: campos[11],
     peso: campos[12], medicamentos: campos[13], plan: campos[14]
   };
 }
 
-app.get('/', (req, res) => { res.send('Agente Senior Life - Luis Osorio - Activo con Browserless'); });
+app.get('/', (req, res) => { res.send('Agente Senior Life Insurance - Luis Osorio - Activo'); });
 
 app.post('/whatsapp', async (req, res) => {
   const incomingMsg = req.body.Body?.trim();
@@ -254,7 +282,7 @@ app.post('/whatsapp', async (req, res) => {
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-haiku-3-5-20241022',
       max_tokens: 600,
       system: SYSTEM_PROMPT,
       messages: recentHistory,
@@ -266,7 +294,7 @@ app.post('/whatsapp', async (req, res) => {
     const lead = parsearLead(reply);
     if (lead) {
       console.log('LEAD CALIFICADO:', JSON.stringify(lead));
-      llenarPortal(lead); // en background
+      llenarPortal(lead); // ejecutar en background
     }
 
     const replyLimpio = reply.replace(/##LEAD##.*/g, '').trim();
