@@ -7,82 +7,139 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-// Guardar conversaciones por número de teléfono
 const conversations = new Map();
 
-const SYSTEM_PROMPT = `Eres el asistente virtual de Luis Osorio del Centro de Inscripciones para el Beneficio de los Gastos Funerales de Senior Life Insurance (54 años en el mercado).
+const SYSTEM_PROMPT = `Eres Luis Osorio, agente de Senior Life Insurance. Hablas con clientes por WhatsApp de forma muy natural y humana.
 
-OBJETIVO: Seguir el script de ventas de Luis Osorio por WhatsApp, de forma natural y conversacional.
+PERSONALIDAD:
+- Hablas como una persona real, no como un robot
+- Eres cálido, empático y paciente
+- Usas frases como "mire...", "fíjese que...", "le cuento...", "qué bueno que me escribió..."
+- Repites lo que dice el cliente para mostrar que escuchaste
+- Usas "usted" con respeto pero de forma cercana
+- NUNCA suenas a script o ventas agresivas
 
-FLUJO OBLIGATORIO (UNA pregunta a la vez):
-1. Bienvenida: preguntar nombre y apellido del cliente
-2. ¿Para quién es el seguro? (él/ella o un ser querido)
-3. Impacto emocional: "Si ayer hubiese ocurrido un fallecimiento en su familia, ¿estaría preparado(a) financieramente?" — esperar NO y empatizar
-4. Datos básicos: fecha de nacimiento completa, género, ciudad y estado
-5. ¿Toma sus propias decisiones económicas?
-6. SALUD (una por una):
-   a. ¿Hospitalizado actualmente o en centro de enfermería? SI/NO
-   b. ¿Diagnóstico de cáncer o derrame cerebral? SI/NO
-   c. ¿Usa tabaco o nicotina actualmente? SI/NO
-   d. ¿En los últimos 10 años usó tabaco/nicotina o presión arterial >135/85? SI/NO
-   e. ¿Cuánto mide? (pies y pulgadas)
-   f. ¿Cuánto pesa? (libras)
-   g. ¿Toma medicamentos recetados? SI/NO
-7. ¿Cremación, entierro tradicional o repatriación?
-8. Beneficios del programa: Family Support Service, descuentos 60%, prima nivelada, cobertura nacional e internacional, sin down payment
-9. Determinar producto según salud:
-   - Sin hospitalización + sin cáncer + sin tabaco + sin presión alta = "Seguro de Vida Entera Máximo Preferido"
-   - Con tabaco O presión alta = "Seguro de Vida Entera Super Preferido"
-   - Con más condiciones = "Seguro de Vida Entera Preferido"
-10. Presentar 3 planes:
-    - Plan Bueno: $15,500 natural y accidental — $68.41/mes (~$2.28/día)
-    - Plan Mejor: $18,000 natural y accidental — $78.95/mes (~$2.63/día)
-    - Plan Óptimo: $20,500 natural y accidental — $89.49/mes (~$2.98/día)
-11. Cuando el cliente elija un plan, confirmar y decir que Luis Osorio lo contactará para finalizar.
+FORMATO — MUY IMPORTANTE:
+Divide SIEMPRE tu respuesta en DOS partes separadas por: ---PAUSA---
+Parte 1: reacción humana (1-2 oraciones)
+Parte 2: siguiente pregunta (1-2 oraciones)
 
-TÉCNICAS DEL SCRIPT:
-- Respuestas CORTAS (máximo 3-4 oraciones) — es WhatsApp, no email
-- Una pregunta a la vez
-- Confirmaciones: "¿correcto?", "¿de acuerdo?", "¿verdad?"
-- Si hospitalizado=NO: "Gracias a Dios. Lamentablemente muchas personas nos llaman desde el hospital y ya no podemos ayudarlas."
-- Historia del Sr. Salvador (53 años, murió sin el plan) si el cliente duda
-- Si buena salud: "La felicito, eso será muy favorable para ser aprobado(a)"
-- Si medicamentos: "La felicito, significa que mantiene sus condiciones bajo control"
-- Si quiere consultar: "Ningún familiar se molesta porque dejemos esto arreglado"
-- Urgencia: "El mejor momento fue ayer, el segundo es hoy"
-- Al final cuando elija plan: notificar que Luis Osorio lo contactará pronto
-- SIEMPRE en español, cálido y profesional
-- NO uses markdown, asteriscos ni formato especial — es WhatsApp texto plano`;
+FLUJO (UNA pregunta a la vez):
+1. Saludo y preguntar nombre
+2. Para quién es el seguro
+3. Si ayer hubiese habido un fallecimiento, estaría preparado financieramente?
+4. Fecha de nacimiento, género, ciudad, estado
+5. Toma sus propias decisiones económicas?
+6. SALUD una por una: hospitalizado, cáncer/derrame, tabaco actual, tabaco 10 años o presión >135/85, altura en pies y pulgadas, peso en libras, medicamentos
+7. Cremación, entierro o repatriación?
+8. Beneficios del programa
+9. Tres planes: Bueno $68.41/mes, Mejor $78.95/mes, Óptimo $89.49/mes
+10. Cuando elija el plan, responde confirmando y termina tu mensaje con esta línea exacta:
+##LEAD## nombre|apellido|fechaNacimiento|genero|ciudad|estado|hospitalizado|cancer|tabaco|tabaco10años|alturaPies|alturaPulgadas|peso|medicamentos|plan
+
+REGLAS:
+- Máximo 2 oraciones por parte
+- UNA pregunta a la vez
+- Sin asteriscos ni markdown
+- Historia del Sr. Salvador si el cliente duda
+- SIEMPRE en español natural latino`;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function notificarLuis(datos, plan) {
+  const luisNumber = process.env.LUIS_WHATSAPP;
+  const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
+
+  if (!luisNumber) return;
+
+  const mensaje = `🔔 NUEVO LEAD CALIFICADO
+
+👤 Cliente: ${datos.nombre} ${datos.apellido}
+📅 Fecha nac: ${datos.fechaNacimiento}
+⚥ Género: ${datos.genero}
+📍 ${datos.ciudad}, ${datos.estado}
+
+✅ SALUD:
+• Hospitalizado: ${datos.hospitalizado}
+• Cáncer/derrame: ${datos.cancer}
+• Tabaco actual: ${datos.tabaco}
+• Tabaco 10 años/presión: ${datos.tabaco10}
+• Altura: ${datos.alturaPies} pies ${datos.alturaPulgadas} pulg
+• Peso: ${datos.peso} lbs
+• Medicamentos: ${datos.medicamentos}
+
+💰 PLAN ELEGIDO: ${plan}
+
+📋 Portal Senior Life:
+telesales.srlife.net/prequalifying/app_start_page
+
+¡Llame pronto para cerrar la venta!`;
+
+  try {
+    await twilioClient.messages.create({
+      from: twilioNumber,
+      to: `whatsapp:${luisNumber}`,
+      body: mensaje
+    });
+    console.log('Notificación enviada a Luis');
+  } catch (e) {
+    console.error('Error notificando a Luis:', e.message);
+  }
+}
+
+function parsearLead(texto) {
+  const match = texto.match(/##LEAD##\s*(.+)/);
+  if (!match) return null;
+  
+  const campos = match[1].split('|');
+  if (campos.length < 15) return null;
+
+  return {
+    nombre: campos[0],
+    apellido: campos[1],
+    fechaNacimiento: campos[2],
+    genero: campos[3],
+    ciudad: campos[4],
+    estado: campos[5],
+    hospitalizado: campos[6],
+    cancer: campos[7],
+    tabaco: campos[8],
+    tabaco10: campos[9],
+    alturaPies: campos[10],
+    alturaPulgadas: campos[11],
+    peso: campos[12],
+    medicamentos: campos[13],
+    plan: campos[14]
+  };
+}
 
 app.get('/', (req, res) => {
   res.send('Agente Senior Life Insurance - Luis Osorio - Activo ✓');
 });
 
 app.post('/whatsapp', async (req, res) => {
-  const twiml = new twilio.twiml.MessagingResponse();
   const incomingMsg = req.body.Body?.trim();
   const from = req.body.From;
+  const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
 
-  if (!incomingMsg) {
-    twiml.message('Hola, bienvenido a Senior Life Insurance. ¿En qué le puedo ayudar?');
-    return res.type('text/xml').send(twiml.toString());
-  }
+  res.type('text/xml').send('<Response></Response>');
 
-  // Obtener o crear historial de conversación
-  if (!conversations.has(from)) {
-    conversations.set(from, []);
-  }
+  if (!incomingMsg) return;
+
+  if (!conversations.has(from)) conversations.set(from, []);
   const history = conversations.get(from);
   history.push({ role: 'user', content: incomingMsg });
 
-  // Limitar historial a últimos 20 mensajes para no exceder tokens
   const recentHistory = history.slice(-20);
 
   try {
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 500,
+      max_tokens: 600,
       system: SYSTEM_PROMPT,
       messages: recentHistory,
     });
@@ -90,40 +147,48 @@ app.post('/whatsapp', async (req, res) => {
     const reply = response.content[0].text;
     history.push({ role: 'assistant', content: reply });
 
-    // WhatsApp tiene límite de 1600 caracteres por mensaje
-    if (reply.length > 1500) {
-      const parts = reply.match(/.{1,1500}/gs) || [reply];
-      parts.forEach(part => twiml.message(part));
-    } else {
-      twiml.message(reply);
+    // Verificar si hay lead calificado
+    const lead = parsearLead(reply);
+    if (lead) {
+      console.log('LEAD CALIFICADO:', JSON.stringify(lead));
+      await notificarLuis(lead, lead.plan);
     }
 
-    // Si el cliente eligió un plan, notificar a Luis (log por ahora)
-    if (reply.toLowerCase().includes('luis osorio lo contactará') || 
-        reply.toLowerCase().includes('plan seleccionado')) {
-      console.log(`LEAD CALIFICADO - ${from}: ${incomingMsg}`);
+    // Limpiar ##LEAD## del mensaje antes de enviarlo
+    const replyLimpio = reply.replace(/##LEAD##.*/g, '').trim();
+
+    // Dividir en dos partes por ---PAUSA---
+    const parts = replyLimpio.split('---PAUSA---').map(p => p.trim()).filter(p => p.length > 0);
+
+    if (parts[0]) {
+      await twilioClient.messages.create({ from: twilioNumber, to: from, body: parts[0] });
+    }
+
+    if (parts[1]) {
+      await sleep(2500 + Math.random() * 2000);
+      await twilioClient.messages.create({ from: twilioNumber, to: from, body: parts[1] });
     }
 
   } catch (error) {
-    console.error('Error API Anthropic:', error);
-    twiml.message('Disculpe, tuve un problema técnico. Por favor escríbame de nuevo en un momento.');
+    console.error('Error:', error);
+    try {
+      await twilioClient.messages.create({
+        from: twilioNumber, to: from,
+        body: 'Disculpe, tuve un pequeño problema. Me puede repetir lo que me dijo?'
+      });
+    } catch (e) { console.error('Error enviando mensaje:', e); }
   }
-
-  res.type('text/xml').send(twiml.toString());
 });
 
-// Endpoint para reiniciar conversación
 app.post('/reset', (req, res) => {
   const { phone } = req.body;
   if (phone && conversations.has(phone)) {
     conversations.delete(phone);
-    res.json({ success: true, message: `Conversación de ${phone} reiniciada` });
+    res.json({ success: true });
   } else {
-    res.json({ success: false, message: 'Número no encontrado' });
+    res.json({ success: false });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Agente Senior Life activo en puerto ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Agente Senior Life activo en puerto ${PORT}`));
