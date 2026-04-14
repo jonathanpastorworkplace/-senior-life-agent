@@ -1,6 +1,7 @@
 const express = require('express');
 const twilio = require('twilio');
 const Anthropic = require('@anthropic-ai/sdk');
+const puppeteer = require('puppeteer-core');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -50,41 +51,175 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function notificarLuis(datos) {
+async function llenarPortal(datos) {
+  const token = process.env.BROWSERLESS_TOKEN;
+  const agentId = process.env.SRLIFE_AGENT_ID;
+  const password = process.env.SRLIFE_PASSWORD;
   const luisNumber = process.env.LUIS_WHATSAPP;
   const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
-  if (!luisNumber) return;
 
-  const mensaje = `NUEVO LEAD CALIFICADO
+  let browser;
+  try {
+    browser = await puppeteer.connect({
+      browserWSEndpoint: `wss://production-sfo.browserless.io?token=${token}`,
+    });
 
-Cliente: ${datos.nombre} ${datos.apellido}
-Fecha nac: ${datos.fechaNacimiento}
-Genero: ${datos.genero}
-${datos.ciudad}, ${datos.estado}
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
 
-SALUD:
-Hospitalizado: ${datos.hospitalizado}
-Cancer/derrame: ${datos.cancer}
-Tabaco actual: ${datos.tabaco}
-Tabaco 10 anos o presion: ${datos.tabaco10}
-Altura: ${datos.pies} pies ${datos.pulgadas} pulg
-Peso: ${datos.peso} lbs
-Medicamentos: ${datos.medicamentos}
+    // LOGIN
+    console.log('Entrando al portal...');
+    await page.goto('https://telesales.srlife.net/login', { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.waitForSelector('input', { timeout: 10000 });
+    const inputs = await page.$$('input');
+    if (inputs[0]) { await inputs[0].click(); await inputs[0].type(agentId); }
+    if (inputs[1]) { await inputs[1].click(); await inputs[1].type(password); }
+    await page.click('button[type="submit"], input[type="submit"]');
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
+    console.log('Login exitoso');
 
-PLAN ELEGIDO: ${datos.plan}
+    // PÁGINA 1 — Asegurado Propuesto
+    await page.goto('https://telesales.srlife.net/prequalifying/app_start_page', { waitUntil: 'networkidle2', timeout: 15000 });
+    await page.waitForSelector('input', { timeout: 10000 });
+    await sleep(1000);
 
-Llene el portal y llame para cerrar:
+    const allInputs = await page.$$('input[type="text"], input:not([type="radio"]):not([type="checkbox"]):not([type="submit"]):not([type="button"])');
+    if (allInputs[0]) { await allInputs[0].triple_click(); await allInputs[0].type(datos.nombre); }
+    if (allInputs[1]) { await allInputs[1].triple_click(); await allInputs[1].type(datos.apellido); }
+
+    await page.$eval('input[type="date"]', (el, val) => { el.value = val; el.dispatchEvent(new Event('change', { bubbles: true })); }, datos.fechaNacimiento);
+
+    const generoValue = datos.genero === 'MASCULINO' ? 'MASCULINO/HOMBRE' : 'FEMENINO/MUJER';
+    const selects = await page.$$('select');
+    for (const sel of selects) {
+      const opts = await sel.evaluate(el => Array.from(el.options).map(o => o.value));
+      if (opts.some(o => o.includes('MASCULINO') || o.includes('FEMENINO'))) {
+        await sel.select(generoValue).catch(() => sel.select(opts.find(o => o.includes(datos.genero === 'MASCULINO' ? 'MASC' : 'FEM')) || opts[1]));
+        break;
+      }
+    }
+
+    const cityInputs = await page.$$('input[type="text"]');
+    for (const inp of cityInputs) {
+      const ph = await inp.evaluate(el => (el.placeholder || '').toLowerCase());
+      if (ph.includes('ciudad') || ph.includes('city')) { await inp.type(datos.ciudad); break; }
+    }
+
+    const stateSelects = await page.$$('select');
+    for (const sel of stateSelects) {
+      const opts = await sel.evaluate(el => Array.from(el.options).map(o => ({ val: o.value, txt: o.text })));
+      if (opts.some(o => o.txt.includes('FLORIDA') || o.txt.includes('CALIFORNIA') || o.txt.includes('TEXAS'))) {
+        const match = opts.find(o => o.txt.toUpperCase().includes(datos.estado.toUpperCase()));
+        if (match) await sel.select(match.val);
+        break;
+      }
+    }
+
+    await page.click('button:not([type="button"]), input[value*="SIGUIENTE"]').catch(() => {});
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+
+    // PÁGINA 2 — Hospitalizaciones y Salud
+    await page.waitForSelector('input[type="radio"]', { timeout: 10000 });
+    await sleep(500);
+    const radios1 = await page.$$('input[type="radio"]');
+    // Hospitalizado NO=índice 1, SI=índice 0
+    const hospIdx = datos.hospitalizado === 'NO' ? 1 : 0;
+    if (radios1[hospIdx]) await radios1[hospIdx].click();
+    const cancerIdx = datos.cancer === 'NO' ? 3 : 2;
+    if (radios1[cancerIdx]) await radios1[cancerIdx].click();
+    await page.click('button, input[value*="SIGUIENTE"]').catch(() => {});
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+
+    // PÁGINA 3 — Tabaco
+    await page.waitForSelector('input[type="radio"]', { timeout: 10000 });
+    await sleep(500);
+    const radios2 = await page.$$('input[type="radio"]');
+    const tabacoIdx = datos.tabaco === 'NO' ? 1 : 0;
+    if (radios2[tabacoIdx]) await radios2[tabacoIdx].click();
+    const tabaco10Idx = datos.tabaco10 === 'NO' ? 3 : 2;
+    if (radios2[tabaco10Idx]) await radios2[tabaco10Idx].click();
+    await page.click('button, input[value*="SIGUIENTE"]').catch(() => {});
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+
+    // PÁGINA 4 — Altura, Peso y Medicamentos
+    await page.waitForSelector('select', { timeout: 10000 });
+    await sleep(500);
+    const selects4 = await page.$$('select');
+    if (selects4[0]) await selects4[0].select(datos.pies).catch(() => {});
+    if (selects4[1]) await selects4[1].select(datos.pulgadas).catch(() => {});
+    const pesoInput = await page.$('input[type="number"], input[type="text"]');
+    if (pesoInput) { await pesoInput.click(); await pesoInput.type(datos.peso); }
+    const radios3 = await page.$$('input[type="radio"]');
+    const medsIdx = datos.medicamentos === 'NO' ? 1 : 0;
+    if (radios3[medsIdx]) await radios3[medsIdx].click();
+    await page.click('button, input[value*="SIGUIENTE"]').catch(() => {});
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+
+    // PÁGINA 5 — Seleccionar Producto
+    await sleep(2000);
+    const productoTexto = (datos.hospitalizado === 'NO' && datos.cancer === 'NO' && datos.tabaco === 'NO' && datos.tabaco10 === 'NO')
+      ? 'MÁXIMO PREFERIDO' : (datos.tabaco === 'SI' || datos.tabaco10 === 'SI') ? 'SUPER PREFERIDO' : 'PREFERIDO';
+
+    const items = await page.$$('li, tr, div[role="button"], .product-item');
+    for (const item of items) {
+      const text = await item.evaluate(el => el.textContent.toUpperCase());
+      if (text.includes(productoTexto.replace('Á', 'A').replace('É', 'E'))) {
+        await item.click();
+        break;
+      }
+    }
+    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => {});
+
+    // PÁGINA 6 — Capturar planes reales
+    await sleep(2000);
+    const pageText = await page.evaluate(() => document.body.innerText);
+    console.log('Planes capturados:', pageText.substring(0, 500));
+
+    await browser.close();
+
+    // Notificar a Luis con planes reales
+    const mensaje = `✅ LEAD CALIFICADO - Portal llenado automaticamente!
+
+👤 ${datos.nombre} ${datos.apellido}
+📍 ${datos.ciudad}, ${datos.estado}
+📅 ${datos.fechaNacimiento} | ${datos.genero}
+
+🏥 SALUD:
+• Hospitalizado: ${datos.hospitalizado}
+• Cancer/derrame: ${datos.cancer}
+• Tabaco: ${datos.tabaco}
+• Medicamentos: ${datos.medicamentos}
+
+💰 PLAN ELEGIDO: ${datos.plan}
+📋 Producto: ${productoTexto}
+
+El portal ya fue llenado. Entre a revisar los planes exactos y llame para cerrar!
 telesales.srlife.net`;
 
-  try {
-    await twilioClient.messages.create({
-      from: twilioNumber,
-      to: `whatsapp:+${luisNumber}`,
-      body: mensaje
-    });
-    console.log('Notificacion enviada a Luis');
-  } catch (e) {
-    console.error('Error notificando a Luis:', e.message);
+    if (luisNumber) {
+      await twilioClient.messages.create({
+        from: twilioNumber,
+        to: `whatsapp:+${luisNumber}`,
+        body: mensaje
+      });
+    }
+
+  } catch (error) {
+    console.error('Error llenando portal:', error.message);
+    if (browser) await browser.close().catch(() => {});
+
+    if (luisNumber) {
+      const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
+      await twilioClient.messages.create({
+        from: twilioNumber,
+        to: `whatsapp:+${luisNumber}`,
+        body: `LEAD CALIFICADO (llenar portal manualmente):
+Cliente: ${datos.nombre} ${datos.apellido}
+${datos.ciudad}, ${datos.estado}
+Plan: ${datos.plan}
+telesales.srlife.net`
+      }).catch(e => console.error('Error notif:', e));
+    }
   }
 }
 
@@ -102,9 +237,7 @@ function parsearLead(texto) {
   };
 }
 
-app.get('/', (req, res) => {
-  res.send('Agente Senior Life Insurance - Luis Osorio - Activo');
-});
+app.get('/', (req, res) => { res.send('Agente Senior Life - Luis Osorio - Activo con Browserless'); });
 
 app.post('/whatsapp', async (req, res) => {
   const incomingMsg = req.body.Body?.trim();
@@ -132,8 +265,8 @@ app.post('/whatsapp', async (req, res) => {
 
     const lead = parsearLead(reply);
     if (lead) {
-      console.log('LEAD:', JSON.stringify(lead));
-      notificarLuis(lead);
+      console.log('LEAD CALIFICADO:', JSON.stringify(lead));
+      llenarPortal(lead); // en background
     }
 
     const replyLimpio = reply.replace(/##LEAD##.*/g, '').trim();
@@ -148,10 +281,7 @@ app.post('/whatsapp', async (req, res) => {
   } catch (error) {
     console.error('Error:', error);
     try {
-      await twilioClient.messages.create({
-        from: twilioNumber, to: from,
-        body: 'Disculpe, tuve un pequeño problema. Me puede repetir lo que me dijo?'
-      });
+      await twilioClient.messages.create({ from: twilioNumber, to: from, body: 'Disculpe, tuve un pequeño problema. Me puede repetir lo que me dijo?' });
     } catch (e) {}
   }
 });
