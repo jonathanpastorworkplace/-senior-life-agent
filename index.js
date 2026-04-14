@@ -17,9 +17,7 @@ PERSONALIDAD:
 - Hablas como una persona real, no como un robot
 - Eres cálido, empático y paciente
 - Usas frases como "mire...", "fíjese que...", "le cuento...", "qué bueno que me escribió..."
-- Repites lo que dice el cliente para mostrar que escuchaste
 - Usas "usted" con respeto pero de forma cercana
-- NUNCA suenas a script o ventas agresivas
 
 FORMATO — MUY IMPORTANTE:
 Divide SIEMPRE tu respuesta en DOS partes separadas por: ---PAUSA---
@@ -32,12 +30,11 @@ FLUJO (UNA pregunta a la vez):
 3. Si ayer hubiese habido un fallecimiento, estaría preparado financieramente?
 4. Fecha de nacimiento, género, ciudad, estado
 5. Toma sus propias decisiones económicas?
-6. SALUD una por una: hospitalizado, cancer/derrame, tabaco actual, tabaco 10 años o presión mayor a 135/85, altura en pies y pulgadas, peso en libras, medicamentos
+6. SALUD: hospitalizado, cancer/derrame, tabaco actual, tabaco 10 años o presión mayor 135/85, altura, peso, medicamentos
 7. Cremación, entierro o repatriación?
 8. Beneficios del programa
-9. Tres planes: Bueno 68.41 al mes, Mejor 78.95 al mes, Óptimo 89.49 al mes
-10. Cuando elija el plan, confirma y termina con:
-##LEAD## nombre|apellido|fechaNacimiento|genero|ciudad|estado|hospitalizado|cancer|tabaco|tabaco10|pies|pulgadas|peso|medicamentos|plan
+9. Tres planes: Bueno 68.41/mes, Mejor 78.95/mes, Óptimo 89.49/mes
+10. Confirmar plan elegido y decir que Luis Osorio lo llamará pronto
 
 REGLAS:
 - Máximo 2 oraciones por parte
@@ -48,58 +45,6 @@ REGLAS:
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-async function notificarLuis(datos) {
-  const luisNumber = process.env.LUIS_WHATSAPP;
-  const twilioNumber = process.env.TWILIO_WHATSAPP_NUMBER || 'whatsapp:+14155238886';
-  if (!luisNumber) return;
-
-  const mensaje = `NUEVO LEAD CALIFICADO
-
-Cliente: ${datos.nombre} ${datos.apellido}
-Fecha nac: ${datos.fechaNacimiento}
-Genero: ${datos.genero}
-${datos.ciudad}, ${datos.estado}
-
-SALUD:
-Hospitalizado: ${datos.hospitalizado}
-Cancer/derrame: ${datos.cancer}
-Tabaco actual: ${datos.tabaco}
-Tabaco 10 anos o presion: ${datos.tabaco10}
-Altura: ${datos.pies} pies ${datos.pulgadas} pulg
-Peso: ${datos.peso} lbs
-Medicamentos: ${datos.medicamentos}
-
-PLAN ELEGIDO: ${datos.plan}
-
-Llame para cerrar la venta:
-telesales.srlife.net`;
-
-  try {
-    await twilioClient.messages.create({
-      from: twilioNumber,
-      to: `whatsapp:+${luisNumber}`,
-      body: mensaje
-    });
-    console.log('Notificacion enviada a Luis');
-  } catch (e) {
-    console.error('Error notificando:', e.message);
-  }
-}
-
-function parsearLead(texto) {
-  const match = texto.match(/##LEAD##\s*(.+)/);
-  if (!match) return null;
-  const campos = match[1].split('|');
-  if (campos.length < 15) return null;
-  return {
-    nombre: campos[0], apellido: campos[1], fechaNacimiento: campos[2],
-    genero: campos[3], ciudad: campos[4], estado: campos[5],
-    hospitalizado: campos[6], cancer: campos[7], tabaco: campos[8],
-    tabaco10: campos[9], pies: campos[10], pulgadas: campos[11],
-    peso: campos[12], medicamentos: campos[13], plan: campos[14]
-  };
 }
 
 app.get('/', (req, res) => {
@@ -130,14 +75,7 @@ app.post('/whatsapp', async (req, res) => {
     const reply = response.content[0].text;
     history.push({ role: 'assistant', content: reply });
 
-    const lead = parsearLead(reply);
-    if (lead) {
-      console.log('LEAD:', JSON.stringify(lead));
-      notificarLuis(lead);
-    }
-
-    const replyLimpio = reply.replace(/##LEAD##.*/g, '').trim();
-    const parts = replyLimpio.split('---PAUSA---').map(p => p.trim()).filter(p => p.length > 0);
+    const parts = reply.split('---PAUSA---').map(p => p.trim()).filter(p => p.length > 0);
 
     if (parts[0]) await twilioClient.messages.create({ from: twilioNumber, to: from, body: parts[0] });
     if (parts[1]) {
@@ -145,21 +83,11 @@ app.post('/whatsapp', async (req, res) => {
       await twilioClient.messages.create({ from: twilioNumber, to: from, body: parts[1] });
     }
 
-  } catch (error) {
-    console.error('Error:', error);
-    try {
-      await twilioClient.messages.create({
-        from: twilioNumber, to: from,
-        body: 'Disculpe, tuve un pequeño problema. Me puede repetir lo que me dijo?'
-      });
-    } catch (e) {}
-  }
-});
+    console.log(`Mensaje de ${from}: ${incomingMsg}`);
 
-app.post('/reset', (req, res) => {
-  const { phone } = req.body;
-  if (phone && conversations.has(phone)) { conversations.delete(phone); res.json({ success: true }); }
-  else res.json({ success: false });
+  } catch (error) {
+    console.error('Error:', error.message);
+  }
 });
 
 const PORT = process.env.PORT || 3000;
